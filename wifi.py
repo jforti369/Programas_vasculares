@@ -1,0 +1,121 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[ ]:
+
+
+import tkinter as tk
+from tkinter import ttk
+
+class WiFiCalculator(tk.Tk):
+    def __init__(self):
+        super().__init__()
+
+        self.title("Classificação WIFI")
+        self.configure(bg='gray15')
+
+        # Estilo para Combobox
+        style = ttk.Style(self)
+        style.theme_use('clam')
+        style.configure('TCombobox',
+                        selectbackground='gray15',
+                        selectforeground='white',
+                        fieldbackground='gray25',
+                        background='gray25',
+                        foreground='white')
+
+        self.descriptions = {
+            "W": [
+                "Sem úlcera (dor isquêmica em repouso)",
+                "Úlcera pequena e superficial na perna ou pé distal sem gangrena",
+                "Úlcera profunda com osso exposto, articulação ou tendão ± alterações gangrenosas limitadas nos dedos dos pés",
+                "Úlcera profunda extensa, úlcera infernal de espessura total ± envolvimento calcâneo ± gangrena extensa",
+            ],
+            "I": [
+                "> 0,80",
+                "0,60 - 0,79",
+                "0,40 - 0,59",
+                "< 0,40",
+            ],
+            "Fi": [
+                "Sem sintomas ou sinais de infecção",
+                "Infecção local envolvendo só a pele e tecido celular subcutâneo",
+                "Infecção local envolvendo mais profundamente que a pele e tecido celular subcutâneo",
+                "Síndrome de resposta inflamatória sistêmica",
+            ],
+        }
+
+        self.show_descriptions()
+
+        self.w_var = tk.StringVar()
+        self.i_var = tk.StringVar()
+        self.fi_var = tk.StringVar()
+
+        self.create_dropdown("W", self.w_var, 4)
+        self.create_dropdown("I", self.i_var, 5)
+        self.create_dropdown("Fi", self.fi_var, 6)
+
+        btn = ttk.Button(self, text="Calcular WIFI", command=self.calculate_wifi)
+        btn.grid(row=7, columnspan=2, pady=10)
+
+        self.result_label = ttk.Label(self, text="", font=("Arial", 16, "bold"), relief="raised", padding=(10, 10))
+        self.result_label.grid(row=8, columnspan=2, pady=10)
+
+    def show_descriptions(self):
+        for row, (key, values) in enumerate(self.descriptions.items(), start=1):
+            label = ttk.Label(self, text=key, font=("Arial", 12, "bold"), background='gray15', foreground='white')
+            label.grid(row=row, column=0, padx=10, pady=5, sticky="w")
+            description = "\n".join(["{}: {}".format(i, v) for i, v in enumerate(values)])
+            label = ttk.Label(self, text=description, background='gray15', foreground='white')
+            label.grid(row=row, column=1, padx=10, pady=5, sticky="w")
+
+    def create_dropdown(self, label_text, variable, row):
+        label = ttk.Label(self, text=label_text, background='gray15', foreground='white')
+        label.grid(row=row, column=0, padx=10, pady=10, sticky="w")
+
+        dropdown = ttk.Combobox(self, textvariable=variable, style='TCombobox')
+        dropdown["values"] = list(range(len(self.descriptions[label_text])))
+        dropdown.grid(row=row, column=1, padx=10, pady=10)
+        dropdown.set('Selecione')  # Placeholder text
+
+    def calculate_wifi(self):
+        try:
+            w = int(self.w_var.get())
+            i = int(self.i_var.get())
+            fi = int(self.fi_var.get())
+
+            total_wifi = w + i + fi
+
+            risk = ""
+            benefit = ""
+            color = ""
+
+            if total_wifi < 4:
+                risk = "RISCO BAIXO"
+                benefit = "ALTO BENEFÍCIO ESPERADO"
+                color = "green"
+            elif 4 <= total_wifi <= 7:
+                risk = "RISCO MODERADO"
+                benefit = "BENEFÍCIO MODERADO ESPERADO"
+                color = "orange"
+            else:
+                risk = "RISCO ALTO"
+                benefit = "BAIXO BENEFÍCIO ESPERADO"
+                color = "red"
+
+            self.result_label["text"] = "WIFI TOTAL: {}\nESTIMATIVA DE RISCO: {}\nPROBABILIDADE DE BENEFÍCIO: {}".format(total_wifi, risk, benefit)
+            self.result_label["foreground"] = color
+        except ValueError:
+            self.result_label["text"] = "Por favor, selecione todos os valores"
+            self.result_label["foreground"] = "black"
+
+if __name__ == "__main__":
+    app = WiFiCalculator()
+    app.mainloop()
+
+
+# In[ ]:
+
+
+
+
