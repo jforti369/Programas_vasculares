@@ -1,0 +1,753 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, colorchooser, ttk, simpledialog
+from PIL import Image, ImageTk, ImageDraw
+import json
+import os
+
+class AnnotationApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Ferramenta de Anotação de Imagens")
+
+        self.root.state("zoomed")  # Maximiza a janela no Windows
+
+        # Painéis
+        self.side_panel_left = tk.Frame(root, width=200, bg="lightgrey")
+        self.side_panel_left.pack(side="left", fill="y")
+        self.side_panel_right = tk.Frame(root, width=200, bg="lightgrey")
+        self.side_panel_right.pack(side="right", fill="y")
+
+        # Canvas para exibir imagem e anotações
+        self.canvas = tk.Canvas(self.root, cursor="cross", bg="white")
+        self.canvas.pack(side="right", fill="both", expand=True)
+
+        # Lista de imagens e anotações
+        self.images = []            # [(Image, file_path), ...]
+        self.current_image = None   # Imagem atual do PIL
+        self.current_image_index = 0
+        self.annotations = []       # Lista de dicionários contendo dados da anotação
+
+        # Zoom e movimentação
+        self.zoom_level = 1.0
+        self.pan_x = 0
+        self.pan_y = 0
+        self.canvas.bind("<MouseWheel>", self.on_zoom)
+        self.canvas.bind("<ButtonPress-2>", self.start_pan)
+        self.canvas.bind("<B2-Motion>", self.do_pan)
+
+        # Ferramentas de anotação disponíveis
+        self.tools = [
+            "Bounding Box",
+            "Polygon",
+            "Line",
+            "Ellipse",
+            "Circle",
+            "Freehand",
+            "Arrow",
+            "Text"
+        ]
+        self.annotation_tool = tk.StringVar(value=self.tools[0])
+
+        # ---------------- NOVO: Variáveis para cores de contorno e preenchimento ---------------- #
+        self.selected_color = "#FF0000"   # Cor de contorno padrão
+        self.fill_color = "#FFFF00"       # Cor de preenchimento padrão
+        self.fill_shapes = tk.BooleanVar(value=False)  # Se True, a forma será preenchida
+
+        # Criação dos widgets no painel esquerdo
+        tk.Button(self.side_panel_left, text="Carregar Diretório", command=self.upload_directory).pack(pady=5)
+        tk.Button(self.side_panel_left, text="Carregar Imagens", command=self.upload_images).pack(pady=5)
+        tk.Button(self.side_panel_left, text="Próxima Imagem", command=self.next_image).pack(pady=5)
+        tk.Label(self.side_panel_left, text="Ferramenta de Anotação:", bg="black").pack(pady=5)
+
+        # Combobox com as ferramentas
+        self.tool_combobox = ttk.Combobox(
+            self.side_panel_left,
+            textvariable=self.annotation_tool,
+            values=self.tools,
+            state="readonly"
+        )
+        self.tool_combobox.pack(pady=5)
+
+        # Selecionar cor
+        tk.Button(self.side_panel_left, text="Escolher Cor", command=self.choose_color).pack(pady=5)
+
+        # ---------------- NOVO: Botão e checkbox para preenchimento ----------------
+        fill_frame = tk.Frame(self.side_panel_left, bg="black")
+        fill_frame.pack(pady=5)
+        tk.Checkbutton(
+            fill_frame, 
+            text="Preencher Formas?", 
+            variable=self.fill_shapes, 
+            bg="black"
+        ).pack(side="left", padx=2)
+        tk.Button(
+            fill_frame, 
+            text="Cor de Preenchimento", 
+            command=self.choose_fill_color
+        ).pack(side="left", padx=2)
+
+        # Botão para finalizar polígono (se estiver usando Polygon)
+        tk.Button(self.side_panel_left, text="Finalizar Polígono", command=self.finalize_polygon).pack(pady=5)
+
+        # Botão para salvar (ainda existe, mas cada anotação já será salva individualmente)
+        tk.Button(self.side_panel_left, text="Salvar Anotações", command=self.save_annotations).pack(pady=5)
+
+        # Botão para limpar anotações
+        tk.Button(self.side_panel_left, text="Limpar Anotações (imagem atual)", command=self.clear_annotations).pack(pady=5)
+
+        # Botão para remover última anotação
+        tk.Button(self.side_panel_left, text="Remover Última Anotação", command=self.remove_last_annotation).pack(pady=5)
+
+        # Botões de Zoom
+        tk.Button(self.side_panel_left, text="Zoom +", command=lambda: self.manual_zoom(1.1)).pack(pady=5)
+        tk.Button(self.side_panel_left, text="Zoom -", command=lambda: self.manual_zoom(0.9)).pack(pady=5)
+
+        # Status bar (opcional)
+        self.status_label = tk.Label(self.side_panel_left, text="", bg="lightgrey")
+        self.status_label.pack(pady=10)
+
+        # Variáveis auxiliares para anotações
+        self.start_x = None
+        self.start_y = None
+        self.polygon_points = []
+        self.freehand_line = None
+        self.current_shape_id = None
+        self.drawing_freehand = False
+
+        # Eventos do mouse no canvas
+        self.canvas.bind("<ButtonPress-1>", self.on_click)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_release)
+
+        # --------------------------- BIND: Tecla Enter finaliza polígono ---------------------------
+        self.root.bind("<Return>", lambda e: self.finalize_polygon())
+
+    # --------------------- Carregamento de Imagens --------------------- #
+    def upload_images(self):
+        file_paths = filedialog.askopenfilenames(
+            title="Selecione Imagens",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg")]
+        )
+        if file_paths:
+            for file_path in file_paths:
+                img = Image.open(file_path)
+                self.images.append((img, file_path))
+            self.display_image(self.images[0][0])
+
+    def upload_directory(self):
+        directory = filedialog.askdirectory(title="Selecione o Diretório")
+        if directory:
+            image_extensions = ('.png', '.jpg', '.jpeg')
+            file_paths = [
+                os.path.join(directory, f)
+                for f in os.listdir(directory)
+                if f.lower().endswith(image_extensions)
+            ]
+            if file_paths:
+                for file_path in file_paths:
+                    img = Image.open(file_path)
+                    self.images.append((img, file_path))
+                self.display_image(self.images[0][0])
+
+    # --------------------- Exibição de Imagem --------------------- #
+    def display_image(self, image):
+        self.current_image = image
+        resized_image = self.resize_image(self.current_image)
+        self.tk_image = ImageTk.PhotoImage(resized_image)
+        self.canvas.delete("all")
+        self.canvas.create_image(self.pan_x, self.pan_y, anchor="nw", image=self.tk_image)
+        self.redraw_annotations()
+
+    def resize_image(self, image):
+        width, height = image.size
+        new_width = int(width * self.zoom_level)
+        new_height = int(height * self.zoom_level)
+        return image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+    # --------------------- Ações de Zoom e Pan --------------------- #
+    def on_zoom(self, event):
+        if event.delta > 0:  # Rolagem para cima -> zoom in
+            self.zoom_level *= 1.1
+        else:               # Rolagem para baixo -> zoom out
+            self.zoom_level *= 0.9
+        self.display_image(self.current_image)
+
+    def manual_zoom(self, factor):
+        self.zoom_level *= factor
+        self.display_image(self.current_image)
+
+    def start_pan(self, event):
+        self.canvas.scan_mark(event.x, event.y)
+
+    def do_pan(self, event):
+        self.canvas.scan_dragto(event.x, event.y, gain=1)
+
+    # --------------------- Seleção de Cor --------------------- #
+    def choose_color(self):
+        color = colorchooser.askcolor(title="Escolha a Cor da Anotação")
+        if color[1]:
+            self.selected_color = color[1]
+
+    def choose_fill_color(self):
+        color = colorchooser.askcolor(title="Escolha a Cor de Preenchimento")
+        if color[1]:
+            self.fill_color = color[1]
+
+    # ------------------------ gather_details ------------------------ #
+    def gather_details(self):
+        """
+        Abre um formulário Toplevel para coletar dados (o mesmo de antes).
+        Ao final, pergunta ao usuário onde salvar e salva o JSON (da anotação atual).
+        Retorna o dicionário de detalhes para ser anexado à anotação em memória,
+        mas também salva em disco imediatamente.
+        """
+        detail_window = tk.Toplevel(self.root)
+        detail_window.title("Detalhes da Anotação")
+        detail_window.grab_set()  # bloqueia a janela principal até fechar
+
+        # Variáveis
+        loc_var = tk.StringVar()
+        prof_var = tk.StringVar()
+        diag_var = tk.StringVar()
+
+        gran_check = tk.BooleanVar()
+        gran_percent = tk.StringVar(value="0")
+        fibrina_check = tk.BooleanVar()
+        fibrina_percent = tk.StringVar(value="0")
+        necrose_umida_check = tk.BooleanVar()
+        necrose_umida_percent = tk.StringVar(value="0")
+        necrose_seca_check = tk.BooleanVar()
+        necrose_seca_percent = tk.StringVar(value="0")
+        exposicao_check = tk.BooleanVar()
+        exposicao_percent = tk.StringVar(value="0")
+
+        formato_var = tk.StringVar()
+        borda_nitida_check = tk.BooleanVar()
+        hiperemia_ausente_check = tk.BooleanVar()
+        hiperemia_maior_2_check = tk.BooleanVar()
+        hiperemia_menor_2_check = tk.BooleanVar()
+
+        exsudato_ausente_check = tk.BooleanVar()
+        exsudato_tipo_var = tk.StringVar()
+
+        derma_check = tk.BooleanVar()
+        edema_check = tk.BooleanVar()
+        integra_check = tk.BooleanVar()
+        descamacao_check = tk.BooleanVar()
+        hiperemiapele_check = tk.BooleanVar()
+        varizes_check = tk.BooleanVar()
+
+        row_index = 0
+
+        # Localização
+        tk.Label(detail_window, text="Localização:").grid(row=row_index, column=0, sticky="e")
+        tk.Entry(detail_window, textvariable=loc_var, width=40).grid(row=row_index, column=1, padx=5, pady=5)
+        row_index += 1
+
+        # Profundidade
+        tk.Label(detail_window, text="Profundidade:").grid(row=row_index, column=0, sticky="e")
+        tk.Entry(detail_window, textvariable=prof_var, width=40).grid(row=row_index, column=1, padx=5, pady=5)
+        row_index += 1
+
+        # Leito
+        tk.Label(detail_window, text="Leito (soma <= 100%):").grid(row=row_index, column=0, sticky="ne")
+        leito_frame = tk.Frame(detail_window)
+        leito_frame.grid(row=row_index, column=1, sticky="w", padx=5, pady=5)
+        row_index += 1
+
+        def create_leito_item(parent, text, checkvar, pctvar):
+            frame = tk.Frame(parent)
+            frame.pack(anchor="w", fill="x")
+            cb = tk.Checkbutton(frame, text=text, variable=checkvar)
+            cb.pack(side="left")
+            tk.Label(frame, text="%").pack(side="right")
+            tk.Entry(frame, textvariable=pctvar, width=5).pack(side="right")
+
+        create_leito_item(leito_frame, "Granulação", gran_check, gran_percent)
+        create_leito_item(leito_frame, "Fibrina", fibrina_check, fibrina_percent)
+        create_leito_item(leito_frame, "Necrose Úmida", necrose_umida_check, necrose_umida_percent)
+        create_leito_item(leito_frame, "Necrose Seca", necrose_seca_check, necrose_seca_percent)
+        create_leito_item(leito_frame, "Exposição osso/tendão", exposicao_check, exposicao_percent)
+
+        # Bordas
+        tk.Label(detail_window, text="Bordas:").grid(row=row_index, column=0, sticky="ne")
+        borda_frame = tk.Frame(detail_window)
+        borda_frame.grid(row=row_index, column=1, sticky="w", padx=5, pady=5)
+        row_index += 1
+
+        tk.Label(borda_frame, text="Formato:").pack(anchor="w")
+        tk.Entry(borda_frame, textvariable=formato_var, width=30).pack(anchor="w")
+        tk.Checkbutton(borda_frame, text="Nítida", variable=borda_nitida_check).pack(anchor="w")
+        tk.Checkbutton(borda_frame, text="Hiperemia ausente", variable=hiperemia_ausente_check).pack(anchor="w")
+        tk.Checkbutton(borda_frame, text="Hiperemia > 2 cm", variable=hiperemia_maior_2_check).pack(anchor="w")
+        tk.Checkbutton(borda_frame, text="Hiperemia < 2 cm", variable=hiperemia_menor_2_check).pack(anchor="w")
+
+        # Exsudato
+        tk.Label(detail_window, text="Exsudato:").grid(row=row_index, column=0, sticky="ne")
+        exsudato_frame = tk.Frame(detail_window)
+        exsudato_frame.grid(row=row_index, column=1, sticky="w", padx=5, pady=5)
+        row_index += 1
+        tk.Checkbutton(exsudato_frame, text="Ausente", variable=exsudato_ausente_check).pack(anchor="w")
+        tk.Label(exsudato_frame, text="Se presente, tipo:").pack(anchor="w")
+        tk.Entry(exsudato_frame, textvariable=exsudato_tipo_var, width=30).pack(anchor="w")
+
+        # Pele periférica
+        tk.Label(detail_window, text="Pele periférica:").grid(row=row_index, column=0, sticky="ne")
+        pele_frame = tk.Frame(detail_window)
+        pele_frame.grid(row=row_index, column=1, sticky="w", padx=5, pady=5)
+        row_index += 1
+        tk.Checkbutton(pele_frame, text="Dermatite ocre", variable=derma_check).pack(anchor="w")
+        tk.Checkbutton(pele_frame, text="Edema", variable=edema_check).pack(anchor="w")
+        tk.Checkbutton(pele_frame, text="Íntegra", variable=integra_check).pack(anchor="w")
+        tk.Checkbutton(pele_frame, text="Descamação", variable=descamacao_check).pack(anchor="w")
+        tk.Checkbutton(pele_frame, text="Hiperemia", variable=hiperemiapele_check).pack(anchor="w")
+        tk.Checkbutton(pele_frame, text="Varizes", variable=varizes_check).pack(anchor="w")
+
+        # Diagnóstico
+        tk.Label(detail_window, text="Diagnóstico:").grid(row=row_index, column=0, sticky="e")
+        tk.Entry(detail_window, textvariable=diag_var, width=40).grid(row=row_index, column=1, padx=5, pady=5)
+        row_index += 1
+
+        # Botão de confirmação
+        details_collected = {}
+
+        def on_confirm():
+            def parse_percentage(val_str):
+                try:
+                    return float(val_str.replace(",", "."))
+                except ValueError:
+                    return 0.0
+
+            # Soma dos percentuais
+            gv = parse_percentage(gran_percent.get())
+            fv = parse_percentage(fibrina_percent.get())
+            nuv = parse_percentage(necrose_umida_percent.get())
+            nsv = parse_percentage(necrose_seca_percent.get())
+            expv = parse_percentage(exposicao_percent.get())
+
+            total_leito = gv + fv + nuv + nsv + expv
+            if total_leito > 100:
+                messagebox.showerror(
+                    "Erro de Percentual",
+                    f"A soma dos percentuais ({total_leito:.1f}%) excede 100%. Ajuste."
+                )
+                return
+
+            details_collected.update({
+                "localizacao": loc_var.get(),
+                "profundidade": prof_var.get(),
+                "leito": {
+                    "granulacao": {"presente": gran_check.get(), "percentual": gv},
+                    "fibrina": {"presente": fibrina_check.get(), "percentual": fv},
+                    "necrose_umida": {"presente": necrose_umida_check.get(), "percentual": nuv},
+                    "necrose_seca": {"presente": necrose_seca_check.get(), "percentual": nsv},
+                    "exposicao_de_tecidos": {"presente": exposicao_check.get(), "percentual": expv},
+                },
+                "bordas": {
+                    "formato": formato_var.get(),
+                    "nitida": borda_nitida_check.get(),
+                    "hiperemia_ausente": hiperemia_ausente_check.get(),
+                    "hiperemia_maior_2cm": hiperemia_maior_2_check.get(),
+                    "hiperemia_menor_2cm": hiperemia_menor_2_check.get()
+                },
+                "exsudato": {
+                    "ausente": exsudato_ausente_check.get(),
+                    "tipo": exsudato_tipo_var.get()
+                },
+                "pele_periferica": {
+                    "dermatite_ocre": derma_check.get(),
+                    "edema": edema_check.get(),
+                    "integra": integra_check.get(),
+                    "descamacao": descamacao_check.get(),
+                    "hiperemia": hiperemiapele_check.get(),
+                    "varizes": varizes_check.get()
+                },
+                "diagnostico": diag_var.get()
+            })
+
+            # --------------------------------------------------------------------
+            # Neste momento, perguntamos: "Onde salvar?"
+            # E salvamos esta anotação (detalhes) individualmente.
+            # --------------------------------------------------------------------
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                title="Salvar esta anotação",
+                filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+            )
+            if file_path:
+                # Salva em disco
+                try:
+                    with open(file_path, 'w', encoding='utf-8') as f:
+                        json.dump(details_collected, f, ensure_ascii=False, indent=4)
+                    messagebox.showinfo("Sucesso", f"Anotação salva em:\n{file_path}")
+                except Exception as e:
+                    messagebox.showerror("Erro", f"Não foi possível salvar.\n{e}")
+
+            detail_window.destroy()
+
+        tk.Button(detail_window, text="Confirmar", command=on_confirm).grid(row=row_index, column=0, columnspan=2, pady=10)
+
+        self.root.wait_window(detail_window)
+        return details_collected
+
+    # --------------------- Eventos de Desenho --------------------- #
+    def on_click(self, event):
+        tool = self.annotation_tool.get().lower()
+
+        if tool in ["polygon", "line", "bounding box", "ellipse", "circle", "arrow"]:
+            self.start_x, self.start_y = event.x, event.y
+            if tool == "polygon":
+                self.polygon_points.append((event.x, event.y))
+                if len(self.polygon_points) > 1:
+                    prev = self.polygon_points[-2]
+                    self.canvas.create_line(prev[0], prev[1], event.x, event.y,
+                                            fill=self.selected_color, width=3, tags="temp_shape")
+
+        elif tool == "freehand":
+            self.drawing_freehand = True
+            self.start_x, self.start_y = event.x, event.y
+            self.freehand_line = [(self.start_x, self.start_y)]
+
+        elif tool == "text":
+            text_value = simpledialog.askstring("Texto", "Insira o texto para anotar:")
+            if text_value:
+                # Mesmo que texto não "preencha" visualmente, armazenamos a fill_color se marcado
+                fill_opt = self.fill_color if self.fill_shapes.get() else ""
+                shape_id = self.canvas.create_text(
+                    event.x, event.y,
+                    text=text_value,
+                    fill=self.selected_color,
+                    anchor="nw",
+                    font=("Arial", 16, "bold")
+                )
+                # Pega detalhes e salva em JSON
+                annotation_details = self.gather_details()
+                annotation_data = {
+                    "tool": "text",
+                    "x": event.x,
+                    "y": event.y,
+                    "text": text_value,
+                    "color": self.selected_color,
+                    "fill_color": fill_opt,
+                    "shape_id": shape_id,
+                    "details": annotation_details
+                }
+                self.annotations.append(annotation_data)
+
+    def on_drag(self, event):
+        tool = self.annotation_tool.get().lower()
+        self.canvas.delete("temp_shape")
+
+        if tool == "bounding box":
+            self.canvas.create_rectangle(self.start_x, self.start_y, event.x, event.y,
+                                         outline=self.selected_color, width=3, tag="temp_shape")
+
+        elif tool == "line":
+            self.canvas.create_line(self.start_x, self.start_y, event.x, event.y,
+                                    fill=self.selected_color, width=3, tag="temp_shape")
+
+        elif tool == "ellipse":
+            self.canvas.create_oval(self.start_x, self.start_y, event.x, event.y,
+                                    outline=self.selected_color, width=3, tag="temp_shape")
+
+        elif tool == "circle":
+            r = max(abs(event.x - self.start_x), abs(event.y - self.start_y))
+            x1 = self.start_x - r if event.x < self.start_x else self.start_x
+            y1 = self.start_y - r if event.y < self.start_y else self.start_y
+            x2 = self.start_x + r if event.x > self.start_x else self.start_x
+            y2 = self.start_y + r if event.y > self.start_y else self.start_y
+            self.canvas.create_oval(x1, y1, x2, y2, outline=self.selected_color, width=3, tag="temp_shape")
+
+        elif tool == "arrow":
+            self.canvas.create_line(self.start_x, self.start_y, event.x, event.y,
+                                    fill=self.selected_color, width=3, arrow=tk.LAST, tag="temp_shape")
+
+        elif tool == "freehand" and self.drawing_freehand:
+            self.canvas.create_line(self.start_x, self.start_y, event.x, event.y,
+                                    fill=self.selected_color, width=3, capstyle=tk.ROUND,
+                                    smooth=True, tag="temp_shape")
+            self.start_x, self.start_y = event.x, event.y
+            self.freehand_line.append((event.x, event.y))
+
+    def on_release(self, event):
+        tool = self.annotation_tool.get().lower()
+        # Se o usuário quiser preencher a forma, definimos fill_opt
+        fill_opt = self.fill_color if self.fill_shapes.get() else ""
+
+        if tool == "bounding box":
+            shape_id = self.canvas.create_rectangle(self.start_x, self.start_y, event.x, event.y,
+                                                    outline=self.selected_color, width=3, fill=fill_opt)
+            # Pega detalhes e salva
+            annotation_details = self.gather_details()
+            annotation_data = {
+                "tool": "bounding box",
+                "start": (self.start_x, self.start_y),
+                "end": (event.x, event.y),
+                "color": self.selected_color,
+                "fill_color": fill_opt,
+                "shape_id": shape_id,
+                "details": annotation_details
+            }
+            self.annotations.append(annotation_data)
+
+        elif tool == "line":
+            # Mesmo em “Line”, armazenamos fill_color para manter consistência,
+            # mas não terá efeito visual no canvas
+            shape_id = self.canvas.create_line(self.start_x, self.start_y, event.x, event.y,
+                                               fill=self.selected_color, width=3)
+            annotation_details = self.gather_details()
+            annotation_data = {
+                "tool": "line",
+                "start": (self.start_x, self.start_y),
+                "end": (event.x, event.y),
+                "color": self.selected_color,
+                "fill_color": fill_opt,
+                "shape_id": shape_id,
+                "details": annotation_details
+            }
+            self.annotations.append(annotation_data)
+
+        elif tool == "ellipse":
+            shape_id = self.canvas.create_oval(self.start_x, self.start_y, event.x, event.y,
+                                               outline=self.selected_color, width=3, fill=fill_opt)
+            annotation_details = self.gather_details()
+            annotation_data = {
+                "tool": "ellipse",
+                "start": (self.start_x, self.start_y),
+                "end": (event.x, event.y),
+                "color": self.selected_color,
+                "fill_color": fill_opt,
+                "shape_id": shape_id,
+                "details": annotation_details
+            }
+            self.annotations.append(annotation_data)
+
+        elif tool == "circle":
+            r = max(abs(event.x - self.start_x), abs(event.y - self.start_y))
+            x1 = self.start_x - r if event.x < self.start_x else self.start_x
+            y1 = self.start_y - r if event.y < self.start_y else self.start_y
+            x2 = self.start_x + r if event.x > self.start_x else self.start_x
+            y2 = self.start_y + r if event.y > self.start_y else self.start_y
+            shape_id = self.canvas.create_oval(x1, y1, x2, y2,
+                                               outline=self.selected_color, width=3, fill=fill_opt)
+            annotation_details = self.gather_details()
+            annotation_data = {
+                "tool": "circle",
+                "center": (self.start_x, self.start_y),
+                "radius": r,
+                "color": self.selected_color,
+                "fill_color": fill_opt,
+                "shape_id": shape_id,
+                "details": annotation_details
+            }
+            self.annotations.append(annotation_data)
+
+        elif tool == "arrow":
+            shape_id = self.canvas.create_line(self.start_x, self.start_y, event.x, event.y,
+                                               fill=self.selected_color, width=3, arrow=tk.LAST)
+            annotation_details = self.gather_details()
+            annotation_data = {
+                "tool": "arrow",
+                "start": (self.start_x, self.start_y),
+                "end": (event.x, event.y),
+                "color": self.selected_color,
+                "fill_color": fill_opt,
+                "shape_id": shape_id,
+                "details": annotation_details
+            }
+            self.annotations.append(annotation_data)
+
+        elif tool == "freehand":
+            if self.drawing_freehand:
+                shape_id = None
+                if len(self.freehand_line) > 1:
+                    shape_id = self.canvas.create_line(self.freehand_line, fill=self.selected_color, width=3,
+                                                       capstyle=tk.ROUND, smooth=True)
+                annotation_details = self.gather_details()
+                annotation_data = {
+                    "tool": "freehand",
+                    "points": self.freehand_line.copy(),
+                    "color": self.selected_color,
+                    "fill_color": fill_opt,  # não terá efeito visual, mas guardamos
+                    "shape_id": shape_id,
+                    "details": annotation_details
+                }
+                self.annotations.append(annotation_data)
+                self.freehand_line.clear()
+                self.drawing_freehand = False
+
+        # Limpar variáveis de controle
+        self.start_x = None
+        self.start_y = None
+        self.current_shape_id = None
+
+    # --------------------- Finalizar Polígono --------------------- #
+    def finalize_polygon(self):
+        if len(self.polygon_points) < 3:
+            messagebox.showwarning("Polígono Inválido",
+                                   "É necessário pelo menos 3 pontos para fechar o polígono.")
+            return
+
+        fill_opt = self.fill_color if self.fill_shapes.get() else ""
+        shape_id = self.canvas.create_polygon(self.polygon_points,
+                                              outline=self.selected_color,
+                                              fill=fill_opt,
+                                              width=3)
+
+        annotation_details = self.gather_details()
+        annotation_data = {
+            "tool": "polygon",
+            "points": self.polygon_points.copy(),
+            "color": self.selected_color,
+            "fill_color": fill_opt,
+            "shape_id": shape_id,
+            "details": annotation_details
+        }
+        self.annotations.append(annotation_data)
+        self.polygon_points.clear()
+
+    # --------------------- Navegação das Imagens --------------------- #
+    def next_image(self):
+        if len(self.images) == 0:
+            return
+        if self.current_image_index < len(self.images) - 1:
+            self.current_image_index += 1
+            self.zoom_level = 1.0
+            self.pan_x = 0
+            self.pan_y = 0
+            self.display_image(self.images[self.current_image_index][0])
+            self.clear_annotations(redraw=False)
+            self.load_annotations_for_current_image()
+
+    # --------------------- Salvamento Global (se ainda quiser usar) --------------------- #
+    def save_annotations(self):
+        """
+        Caso queira salvar TODAS as anotações de uma vez, use este método.
+        Agora só abre um diálogo "Salvar Como..." para escolher a pasta.
+        """
+        if not self.annotations:
+            messagebox.showwarning("Aviso", "Não há anotações para salvar!")
+            return
+
+        image_name = ""
+        if self.images:
+            image_name = os.path.basename(self.images[self.current_image_index][1])
+
+        annotation_data = {
+            "image": image_name,
+            "annotations": self.annotations
+        }
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            title="Salvar TODAS as anotações",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, 'w', encoding='utf-8') as outfile:
+                json.dump(annotation_data, outfile, ensure_ascii=False, indent=4)
+            messagebox.showinfo("Sucesso", f"Arquivo com TODAS as anotações salvo em:\n{file_path}")
+        except Exception as e:
+            messagebox.showerror("Erro", f"Não foi possível salvar.\n{e}")
+
+    def load_annotations_for_current_image(self):
+        """
+        Se quiser carregar anotações de 'annotations/<nome>.json', não modificado.
+        """
+        self.annotations.clear()
+        if not self.images:
+            return
+        image_name = os.path.basename(self.images[self.current_image_index][1])
+        json_path = os.path.join("annotations", f"{os.path.splitext(image_name)[0]}.json")
+        if os.path.exists(json_path):
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if "annotations" in data:
+                    self.annotations = data["annotations"]
+            self.redraw_annotations()
+
+    # --------------------- Limpeza e Redesenho --------------------- #
+    def clear_annotations(self, redraw=True):
+        self.canvas.delete("all")
+        self.annotations.clear()
+        self.polygon_points.clear()  # se estiver desenhando polígono no meio do caminho
+        if redraw and self.current_image is not None:
+            self.display_image(self.current_image)
+
+    def redraw_annotations(self):
+        for ann in self.annotations:
+            tool = ann.get("tool")
+            color = ann.get("color", "#FF0000")
+            fill_c = ann.get("fill_color", "")
+
+            if tool == "polygon":
+                pts = ann.get("points", [])
+                if len(pts) >= 3:
+                    self.canvas.create_polygon(pts, outline=color, fill=fill_c, width=3)
+
+            elif tool == "bounding box":
+                sx, sy = ann["start"]
+                ex, ey = ann["end"]
+                self.canvas.create_rectangle(sx, sy, ex, ey, outline=color, width=3, fill=fill_c)
+
+            elif tool == "line":
+                sx, sy = ann["start"]
+                ex, ey = ann["end"]
+                # Fill não terá efeito visual em line, mas guardamos no JSON
+                self.canvas.create_line(sx, sy, ex, ey, fill=color, width=3)
+
+            elif tool == "ellipse":
+                sx, sy = ann["start"]
+                ex, ey = ann["end"]
+                self.canvas.create_oval(sx, sy, ex, ey, outline=color, width=3, fill=fill_c)
+
+            elif tool == "circle":
+                center = ann.get("center")
+                r = ann.get("radius")
+                if center and r:
+                    x1 = center[0] - r
+                    y1 = center[1] - r
+                    x2 = center[0] + r
+                    y2 = center[1] + r
+                    self.canvas.create_oval(x1, y1, x2, y2, outline=color, width=3, fill=fill_c)
+                else:
+                    sx, sy = ann["start"]
+                    ex, ey = ann["end"]
+                    self.canvas.create_oval(sx, sy, ex, ey, outline=color, width=3, fill=fill_c)
+
+            elif tool == "arrow":
+                sx, sy = ann["start"]
+                ex, ey = ann["end"]
+                # Fill não tem efeito em arrow
+                self.canvas.create_line(sx, sy, ex, ey, fill=color, width=3, arrow=tk.LAST)
+
+            elif tool == "freehand":
+                pts = ann.get("points", [])
+                if len(pts) >= 2:
+                    # Fill não tem efeito em freehand
+                    self.canvas.create_line(pts, fill=color, width=3, capstyle=tk.ROUND, smooth=True)
+
+            elif tool == "text":
+                x = ann.get("x", 0)
+                y = ann.get("y", 0)
+                txt = ann.get("text", "")
+                # Fill não terá efeito no texto, mas armazenamos para manter consistência
+                self.canvas.create_text(x, y, text=txt, fill=color, anchor="nw", font=("Arial", 16, "bold"))
+
+    # --------------------- Remover Anotações --------------------- #
+    def remove_last_annotation(self):
+        if not self.annotations:
+            return
+        self.annotations.pop()
+        self.canvas.delete("all")
+        if self.current_image:
+            self.display_image(self.current_image)
+
+# --------------------- Execução Principal --------------------- #
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = AnnotationApp(root)
+    root.mainloop()
